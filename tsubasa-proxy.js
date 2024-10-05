@@ -7,7 +7,31 @@ const { HttpsProxyAgent } = require('https-proxy-agent');
 
 class Tsubasa {
     constructor() {
-        this.headers = {
+        this.data = this.loadData();
+        this.headers = this.initHeaders();
+        this.config = this.loadConfig();
+        this.proxies = this.loadProxies();
+    }
+
+    loadData() {
+        const dataFile = path.join(__dirname, 'data.txt');
+        return fs.readFileSync(dataFile, 'utf8')
+            .replace(/\r/g, '')
+            .split('\n')
+            .filter(Boolean);
+    }
+
+    loadProxies() {
+        const proxyFile = path.join(__dirname, 'proxy.txt');
+        return fs.readFileSync(proxyFile, 'utf8')
+            .replace(/\r/g, '')
+            .split('\n')
+            .filter(Boolean);
+    }
+
+    initHeaders() {
+        const firstUserId = JSON.parse(decodeURIComponent(this.data[0].split('user=')[1].split('&')[0])).id;
+        return {
             "Accept": "application/json, text/plain, */*",
             "Accept-Encoding": "gzip, deflate, br",
             "Accept-Language": "vi-VN,vi;q=0.9,fr-FR;q=0.8,fr;q=0.7,en-US;q=0.6,en;q=0.5",
@@ -20,30 +44,10 @@ class Tsubasa {
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+            "X-Player-Id": firstUserId.toString(),
+            "X-Masterhash": "fcd309c672b6ede14f2416cca64caa8ceae4040470f67e83a6964aeb68594bbc"
         };
-        this.config = this.loadConfig();
-        this.proxies = this.loadProxies();
-    }
-
-    log(msg, type = 'info') {
-        const timestamp = new Date().toLocaleTimeString();
-        switch(type) {
-            case 'success':
-                console.log(`[${timestamp}] [*] ${msg}`.green);
-                break;
-            case 'custom':
-                console.log(`[${timestamp}] [*] ${msg}`.magenta);
-                break;        
-            case 'error':
-                console.log(`[${timestamp}] [!] ${msg}`.red);
-                break;
-            case 'warning':
-                console.log(`[${timestamp}] [*] ${msg}`.yellow);
-                break;
-            default:
-                console.log(`[${timestamp}] [*] ${msg}`.blue);
-        }
     }
 
     loadConfig() {
@@ -69,16 +73,6 @@ class Tsubasa {
         }
     }
 
-    loadProxies() {
-        const proxyPath = path.join(__dirname, 'proxy.txt');
-        try {
-            return fs.readFileSync(proxyPath, 'utf8').split('\n').filter(Boolean);
-        } catch (error) {
-            console.error("Không đọc được proxy:", error.message);
-            return [];
-        }
-    }
-
     async checkProxyIP(proxy) {
         try {
             const proxyAgent = new HttpsProxyAgent(proxy);
@@ -90,6 +84,26 @@ class Tsubasa {
             }
         } catch (error) {
             throw new Error(`Error khi kiểm tra IP của proxy: ${error.message}`);
+        }
+    }
+
+    log(msg, type = 'info') {
+        const timestamp = new Date().toLocaleTimeString();
+        switch(type) {
+            case 'success':
+                console.log(`[${timestamp}] [*] ${msg}`.green);
+                break;
+            case 'custom':
+                console.log(`[${timestamp}] [*] ${msg}`.magenta);
+                break;        
+            case 'error':
+                console.log(`[${timestamp}] [!] ${msg}`.red);
+                break;
+            case 'warning':
+                console.log(`[${timestamp}] [*] ${msg}`.yellow);
+                break;
+            default:
+                console.log(`[${timestamp}] [*] ${msg}`.blue);
         }
     }
 
@@ -109,7 +123,7 @@ class Tsubasa {
         try {
             const startResponse = await axiosInstance.post(startUrl, startPayload);
             if (startResponse.status === 200 && startResponse.data && startResponse.data.game_data) {
-                const { total_coins, energy, max_energy, coins_per_tap, profit_per_second } = startResponse.data.game_data.user || {};
+                const { total_coins, energy, max_energy, multi_tap_count, profit_per_second } = startResponse.data.game_data.user || {};
                 const masterHash = startResponse.data.master_hash;
                 if (masterHash) {
                     this.headers['X-Masterhash'] = masterHash;
@@ -123,7 +137,7 @@ class Tsubasa {
                     total_coins, 
                     energy, 
                     max_energy, 
-                    coins_per_tap, 
+                    multi_tap_count, 
                     profit_per_second, 
                     tasks,
                     success: true 
@@ -238,9 +252,15 @@ class Tsubasa {
             }
     
             const sortedCards = cardInfo.sort((a, b) => b.nextProfitPerHour - a.nextProfitPerHour);
-    
+            const currentTime = Math.floor(Date.now() / 1000);
+            
             for (const card of sortedCards) {
                 if (cooldownCards.has(card.cardId)) {
+                    continue;
+                }
+
+                if (card.end_datetime && currentTime > card.end_datetime) {
+                    this.log(`Thẻ ${card.name} (${card.cardId}) đã hết hạn. Bỏ qua nâng cấp.`, 'warning');
                     continue;
                 }
     
@@ -276,15 +296,15 @@ class Tsubasa {
         return updatedTotalCoins;
     }
 
-    async callTapAPI(initData, tapCount, axiosInstance) {
+    async callTapAPI(initData, tapcount, axiosInstance) {
         const tapUrl = "https://app.ton.tsubasa-rivals.com/api/tap";
-        const tapPayload = { tapCount: tapCount, initData: initData };
+        const tapPayload = { tapCount: tapcount, initData: initData };
         
         try {
             const tapResponse = await axiosInstance.post(tapUrl, tapPayload);
             if (tapResponse.status === 200) {
-                const { total_coins, energy, max_energy, coins_per_tap, profit_per_second, energy_level, tap_level } = tapResponse.data.game_data.user;
-                return { total_coins, energy, max_energy, coins_per_tap, profit_per_second, energy_level, tap_level, success: true };
+                const { total_coins, energy, max_energy, multi_tap_count, profit_per_second, energy_level, tap_level } = tapResponse.data.game_data.user;
+                return { total_coins, energy, max_energy, multi_tap_count, profit_per_second, energy_level, tap_level, success: true };
             } else {
                 return { success: false, error: `Lỗi tap: ${tapResponse.status}` };
             }
@@ -323,16 +343,18 @@ class Tsubasa {
 
             let currentEnergy = startResult.energy;
             const maxEnergy = startResult.max_energy;
+            const tapcount = Math.floor(currentEnergy / startResult.multi_tap_count);
+            
 
             while (currentEnergy > 0) {
-                const tapResult = await this.callTapAPI(initData, currentEnergy, axiosInstance);
+                const tapResult = await this.callTapAPI(initData, tapcount, axiosInstance);
                 if (!tapResult.success) {
                     this.log(tapResult.error, 'error');
                     continueProcess = false;
                     break;
                 }
 
-                totalTaps += currentEnergy;
+                totalTaps += tapcount;
                 this.log(`Tap thành công | Năng lượng còn ${tapResult.energy}/${tapResult.max_energy} | Balance : ${tapResult.total_coins}`, 'success');
                 currentEnergy = 0;
 
@@ -364,8 +386,8 @@ class Tsubasa {
         try {
             const response = await axiosInstance.post(tapLevelUpUrl, payload);
             if (response.status === 200) {
-                const { tap_level, tap_level_up_cost, coins_per_tap, total_coins } = response.data.game_data.user;
-                return { success: true, tap_level, tap_level_up_cost, coins_per_tap, total_coins };
+                const { tap_level, tap_level_up_cost, multi_tap_count, total_coins } = response.data.game_data.user;
+                return { success: true, tap_level, tap_level_up_cost, multi_tap_count, total_coins };
             } else {
                 return { success: false, error: `Lỗi nâng cấp tap: ${response.status}` };
             }
@@ -398,7 +420,7 @@ class Tsubasa {
             return;
         }
 
-        const requiredProps = ['total_coins', 'energy', 'max_energy', 'coins_per_tap', 'profit_per_second', 'tap_level', 'energy_level'];
+        const requiredProps = ['total_coins', 'energy', 'max_energy', 'multi_tap_count', 'profit_per_second', 'tap_level', 'energy_level'];
         const missingProps = requiredProps.filter(prop => tapResult[prop] === undefined);
         if (missingProps.length > 0) {
             this.log(`Missing required properties: ${missingProps.join(', ')}`, 'error');
@@ -409,7 +431,7 @@ class Tsubasa {
             total_coins, 
             energy,
             max_energy,
-            coins_per_tap,
+            multi_tap_count,
             profit_per_second,
             tap_level,
             energy_level
@@ -424,7 +446,7 @@ class Tsubasa {
                 if (tapUpgradeResult.success) {
                     tap_level = tapUpgradeResult.tap_level;
                     total_coins = tapUpgradeResult.total_coins;
-                    coins_per_tap = tapUpgradeResult.coins_per_tap;
+                    multi_tap_count = tapUpgradeResult.multi_tap_count;
                     tap_level_up_cost = this.calculateTapLevelUpCost(tap_level);
                     this.log(`Nâng cấp Tap thành công | Level: ${tap_level} | Cost: ${tap_level_up_cost} | Balance: ${total_coins}`, 'success');
                 } else {
@@ -460,33 +482,27 @@ class Tsubasa {
     }
 
     async main() {
-        const dataFile = path.join(__dirname, 'data.txt');
-        const data = fs.readFileSync(dataFile, 'utf8')
-            .replace(/\r/g, '')
-            .split('\n')
-            .filter(Boolean);
-
         while (true) {
-            for (let i = 0; i < data.length; i++) {
-                const initData = data[i];
+            for (let i = 0; i < this.data.length; i++) {
+                const initData = this.data[i];
+                const userId = JSON.parse(decodeURIComponent(initData.split('user=')[1].split('&')[0])).id;
                 const firstName = JSON.parse(decodeURIComponent(initData.split('user=')[1].split('&')[0])).first_name;
-                const proxy = this.proxies[i] || '';
-
-                let proxyIP = 'N/A';
+                
+                const proxy = this.proxies[i];
+                let proxyIP = 'Unknown';
                 try {
-                    if (proxy) {
-                        proxyIP = await this.checkProxyIP(proxy);
-                    }
+                    proxyIP = await this.checkProxyIP(proxy);
                 } catch (error) {
-                    this.log(`Lỗi kiểm tra IP proxy: ${error.message}`, 'warning');
-                    continue;
+                    this.log(`Lỗi kiểm tra IP của proxy cho tài khoản ${i + 1}: ${error.message}`, 'warning');
                 }
                 
                 this.log(`========== Tài khoản ${i + 1} | ${firstName} | ip: ${proxyIP} ==========`, 'custom');
 
+                this.headers["X-Player-Id"] = userId.toString();
+
                 const axiosInstance = axios.create({
-                    httpsAgent: proxy ? new HttpsProxyAgent(proxy) : undefined,
-                    headers: this.headers
+                    headers: this.headers,
+                    httpsAgent: new HttpsProxyAgent(proxy)
                 });
 
                 try {
@@ -495,11 +511,9 @@ class Tsubasa {
                         if (startResult.total_coins !== undefined) {
                             this.log(`Balance: ${startResult.total_coins}`);
                             this.log(`Năng lượng: ${startResult.energy}/${startResult.max_energy}`);
-                            this.log(`Coins per tap: ${startResult.coins_per_tap}`);
+                            this.log(`Tap count: ${startResult.multi_tap_count}`);
                             this.log(`Lợi nhuận mỗi giây: ${startResult.profit_per_second}`);
                         }
-
-                        await this.upgradeGameStats(initData, axiosInstance);
 
                         if (startResult.tasks && startResult.tasks.length > 0) {
                             for (const task of startResult.tasks) {
@@ -523,6 +537,8 @@ class Tsubasa {
 
                         const updatedTotalCoins = await this.levelUpCards(initData, startResult.total_coins, axiosInstance);
                         this.log(`Đã nâng cấp hết các thẻ đủ điều kiện | Balance: ${updatedTotalCoins}`, 'success');
+
+                        await this.upgradeGameStats(initData, axiosInstance);
                     } else {
                         this.log(startResult.error, 'error');
                     }
@@ -533,7 +549,7 @@ class Tsubasa {
                 await new Promise(resolve => setTimeout(resolve, 1000));
             }
 
-            await this.countdown(60);
+            await this.countdown(120);
         }
     }
 }

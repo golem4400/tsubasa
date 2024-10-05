@@ -12,6 +12,8 @@ class Tsubasa {
         this.initData = initData;
         this.proxy = proxy;
         this.proxyIP = 'Unknown IP';
+        const userInfo = JSON.parse(decodeURIComponent(this.initData.split('user=')[1].split('&')[0]));
+        const firstUserId = userInfo.id;
         this.headers = {
             "Accept": "application/json, text/plain, */*",
             "Accept-Encoding": "gzip, deflate, br",
@@ -25,7 +27,9 @@ class Tsubasa {
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+            "X-Player-Id": firstUserId.toString(),
+            "X-Masterhash": "fcd309c672b6ede14f2416cca64caa8ceae4040470f67e83a6964aeb68594bbc"
         };
         this.config = this.loadConfig();
     }
@@ -99,7 +103,7 @@ class Tsubasa {
         try {
             const startResponse = await axiosInstance.post(startUrl, startPayload);
             if (startResponse.status === 200 && startResponse.data && startResponse.data.game_data) {
-                const { total_coins, energy, max_energy, coins_per_tap, profit_per_second } = startResponse.data.game_data.user || {};
+                const { total_coins, energy, max_energy, multi_tap_count, profit_per_second } = startResponse.data.game_data.user || {};
                 const masterHash = startResponse.data.master_hash;
                 if (masterHash) {
                     this.headers['X-Masterhash'] = masterHash;
@@ -113,7 +117,7 @@ class Tsubasa {
                     total_coins, 
                     energy, 
                     max_energy, 
-                    coins_per_tap, 
+                    multi_tap_count, 
                     profit_per_second, 
                     tasks,
                     success: true 
@@ -228,9 +232,15 @@ class Tsubasa {
             }
     
             const sortedCards = cardInfo.sort((a, b) => b.nextProfitPerHour - a.nextProfitPerHour);
-    
+            const currentTime = Math.floor(Date.now() / 1000);
+            
             for (const card of sortedCards) {
                 if (cooldownCards.has(card.cardId)) {
+                    continue;
+                }
+
+                if (card.end_datetime && currentTime > card.end_datetime) {
+                    this.log(`Thẻ ${card.name} (${card.cardId}) đã hết hạn. Bỏ qua nâng cấp.`, 'warning');
                     continue;
                 }
     
@@ -255,7 +265,6 @@ class Tsubasa {
                             this.log(`Chưa đến thời gian nâng cấp tiếp theo cho thẻ ${card.name} (${card.cardId})`, 'warning');
                             cooldownCards.add(card.cardId);
                         } else {
-                            console.log(error);
                             this.log(`Lỗi nâng cấp thẻ ${card.name} (${card.cardId}): ${error.message}`, 'error');
                         }
                     }
@@ -273,8 +282,8 @@ class Tsubasa {
         try {
             const tapResponse = await axiosInstance.post(tapUrl, tapPayload);
             if (tapResponse.status === 200) {
-                const { total_coins, energy, max_energy, coins_per_tap, profit_per_second, energy_level, tap_level } = tapResponse.data.game_data.user;
-                return { total_coins, energy, max_energy, coins_per_tap, profit_per_second, energy_level, tap_level, success: true };
+                const { total_coins, energy, max_energy, multi_tap_count, profit_per_second, energy_level, tap_level } = tapResponse.data.game_data.user;
+                return { total_coins, energy, max_energy, multi_tap_count, profit_per_second, energy_level, tap_level, success: true };
             } else {
                 return { success: false, error: `Lỗi tap: ${tapResponse.status}` };
             }
@@ -313,16 +322,17 @@ class Tsubasa {
 
             let currentEnergy = startResult.energy;
             const maxEnergy = startResult.max_energy;
+            const tapcount = Math.floor(currentEnergy / startResult.multi_tap_count);
 
             while (currentEnergy > 0) {
-                const tapResult = await this.callTapAPI(initData, currentEnergy, axiosInstance);
+                const tapResult = await this.callTapAPI(initData, tapcount, axiosInstance);
                 if (!tapResult.success) {
                     this.log(tapResult.error, 'error');
                     continueProcess = false;
                     break;
                 }
 
-                totalTaps += currentEnergy;
+                totalTaps += tapcount;
                 this.log(`Tap thành công | Năng lượng còn ${tapResult.energy}/${tapResult.max_energy} | Balance : ${tapResult.total_coins}`, 'success');
                 currentEnergy = 0;
 
@@ -354,8 +364,8 @@ class Tsubasa {
         try {
             const response = await axiosInstance.post(tapLevelUpUrl, payload);
             if (response.status === 200) {
-                const { tap_level, tap_level_up_cost, coins_per_tap, total_coins } = response.data.game_data.user;
-                return { success: true, tap_level, tap_level_up_cost, coins_per_tap, total_coins };
+                const { tap_level, tap_level_up_cost, multi_tap_count, total_coins } = response.data.game_data.user;
+                return { success: true, tap_level, tap_level_up_cost, multi_tap_count, total_coins };
             } else {
                 return { success: false, error: `Lỗi nâng cấp tap: ${response.status}` };
             }
@@ -388,7 +398,7 @@ class Tsubasa {
             return;
         }
 
-        const requiredProps = ['total_coins', 'energy', 'max_energy', 'coins_per_tap', 'profit_per_second', 'tap_level', 'energy_level'];
+        const requiredProps = ['total_coins', 'energy', 'max_energy', 'multi_tap_count', 'profit_per_second', 'tap_level', 'energy_level'];
         const missingProps = requiredProps.filter(prop => tapResult[prop] === undefined);
         if (missingProps.length > 0) {
             this.log(`Missing required properties: ${missingProps.join(', ')}`, 'error');
@@ -399,7 +409,7 @@ class Tsubasa {
             total_coins, 
             energy,
             max_energy,
-            coins_per_tap,
+            multi_tap_count,
             profit_per_second,
             tap_level,
             energy_level
@@ -414,7 +424,7 @@ class Tsubasa {
                 if (tapUpgradeResult.success) {
                     tap_level = tapUpgradeResult.tap_level;
                     total_coins = tapUpgradeResult.total_coins;
-                    coins_per_tap = tapUpgradeResult.coins_per_tap;
+                    multi_tap_count = tapUpgradeResult.multi_tap_count;
                     tap_level_up_cost = this.calculateTapLevelUpCost(tap_level);
                     this.log(`Nâng cấp Tap thành công | Level: ${tap_level} | Cost: ${tap_level_up_cost} | Balance: ${total_coins}`, 'success');
                 } else {
@@ -467,8 +477,6 @@ class Tsubasa {
                     this.log(`Balance: ${startResult.total_coins} | Năng lượng: ${startResult.energy}/${startResult.max_energy} | Lợi nhuận: ${startResult.profit_per_second}`);
                 }
 
-                await this.upgradeGameStats(this.initData, axiosInstance);
-
                 if (startResult.tasks && startResult.tasks.length > 0) {
                     for (const task of startResult.tasks) {
                         const executeResult = await this.executeTask(this.initData, task.id, axiosInstance);
@@ -491,6 +499,8 @@ class Tsubasa {
 
                 const updatedTotalCoins = await this.levelUpCards(this.initData, startResult.total_coins, axiosInstance);
                 this.log(`Đã nâng cấp hết các thẻ đủ điều kiện | Balance: ${updatedTotalCoins}`, 'success');
+
+                await this.upgradeGameStats(this.initData, axiosInstance);
             } else {
                 this.log(startResult.error, 'error');
             }
@@ -506,7 +516,7 @@ class TsubasaManager {
         this.data = this.loadData();
         this.maxThreads = 10; // số luồng
         this.timeoutDuration = 10 * 60 * 1000;
-        this.restDuration = 300 * 1000; // chờ 300 giây
+        this.restDuration = 600 * 1000; // chờ 300 giây
     }
 
     loadData() {
